@@ -119,7 +119,7 @@ def main():
 
 	print()
 
-"""Function used for Orthogonal Regularization"""
+# Perform Orthogonality Regularization
 def l2_reg_ortho(C, mdl):
     if C.ortho == 'SRIP':
         l2_reg = None
