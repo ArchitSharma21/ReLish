@@ -19,6 +19,7 @@ import torch.backends.cudnn
 import torchvision.models
 import torchvision.datasets
 import torchvision.transforms as transforms
+from torch.autograd import Variable
 import wandb
 import models
 import act_funcs
@@ -28,7 +29,7 @@ import util
 def main():
 
 	parser = argparse.ArgumentParser()
-	parser.add_argument('--wandb_project', type=str, default='train_cls', metavar='NAME', help='Wandb project name (default: %(default)s)')
+	parser.add_argument('--wandb_project', type=str, default='train_cls_with_Ortho', metavar='NAME', help='Wandb project name (default: %(default)s)')
 	parser.add_argument('--wandb_entity', type=str, default=None, metavar='USER_TEAM', help='Wandb entity')
 	parser.add_argument('--wandb_group', type=str, default=None, metavar='GROUP', help='Wandb group')
 	parser.add_argument('--wandb_job_type', type=str, default=None, metavar='TYPE', help='Wandb job type')
@@ -58,6 +59,7 @@ def main():
 	parser.add_argument('--dry', action='store_true', help='Show what would be done but do not actually run the training')
 	parser.add_argument('--no_wandb', dest='use_wandb', action='store_false', help='Do not use wandb')
 	parser.add_argument('--model_details', action='store_true', help='Whether to show model details')
+	parser.add_argument('--ortho', type=str, default='SRIP', help='Select which orthogonality do you want to perform')
 	args = parser.parse_args()
 
 	if args.dataset_path is None:
@@ -117,6 +119,42 @@ def main():
 
 	print()
 
+"""Function used for Orthogonal Regularization"""
+def l2_reg_ortho(C, mdl):
+    if C.ortho == 'SRIP':
+        l2_reg = None
+        for W in mdl.parameters():
+                if W.ndimension() < 2:
+                        continue
+                else:
+                        cols = W[0].numel()
+                        rows = W.shape[0]
+                        w1 = W.view(-1,cols)
+                        wt = torch.transpose(w1,0,1)
+                        if (rows > cols):
+                                m  = torch.matmul(wt,w1)
+                                ident = Variable(torch.eye(cols,cols),requires_grad=True)
+                        else:
+                                m = torch.matmul(w1,wt)
+                                ident = Variable(torch.eye(rows,rows), requires_grad=True)
+
+                        ident = ident.cuda()
+                        w_tmp = (m - ident)
+                        b_k = Variable(torch.rand(w_tmp.shape[1],1))
+                        b_k = b_k.cuda()
+
+                        v1 = torch.matmul(w_tmp, b_k)
+                        norm1 = torch.norm(v1,2)
+                        v2 = torch.div(v1,norm1)
+                        v3 = torch.matmul(w_tmp,v2)
+
+                        if l2_reg is None:
+                                l2_reg = (torch.norm(v3,2))**2
+                        else:
+                                l2_reg = l2_reg + (torch.norm(v3,2))**2
+        return l2_reg
+
+
 # Load the dataset
 def load_dataset(C, details=False):
 
@@ -164,8 +202,8 @@ def load_dataset(C, details=False):
 		])
 		dataset_class = getattr(torchvision.datasets, C.dataset)
 		folder_path = os.path.join(C.dataset_path, 'CIFAR')
-		train_dataset = dataset_class(root=folder_path, train=True, transform=train_tfrm)
-		valid_dataset = dataset_class(root=folder_path, train=False, transform=valid_tfrm)
+		train_dataset = dataset_class(root=folder_path, train=True, transform=train_tfrm, download=True)
+		valid_dataset = dataset_class(root=folder_path, train=False, transform=valid_tfrm, download=True)
 
 	elif C.dataset == 'TinyImageNet':
 		num_classes = 200
@@ -513,7 +551,13 @@ def train_model(C, train_loader, valid_loader, model, output_layer, criterion, o
 
 			with torch.autocast(device_type=device.type, enabled=amp_enabled):
 				output = model(data)
-				mean_batch_loss = criterion(output if output_layer is None else output_layer(output), target)
+				oloss =  l2_reg_ortho(C, model)
+				o_d = 0
+				if epoch>120: o_d=0.0
+				elif epoch > 70: o_d = 1e-6 * o_d
+				elif epoch > 50: o_d = 1e-4 * o_d
+				elif epoch > 20: o_d = 1e-3 * o_d
+				mean_batch_loss = criterion(output if output_layer is None else output_layer(output), target) + o_d * oloss
 				mean_accum_batch_loss = mean_batch_loss / num_batch_accum if batch_num <= num_train_accum_full else mean_batch_loss * (num_in_batch / num_train_accum_samples_last)
 			scaler.scale(mean_accum_batch_loss).backward()
 
