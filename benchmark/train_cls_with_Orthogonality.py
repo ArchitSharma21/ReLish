@@ -20,6 +20,7 @@ import torchvision.models
 import torchvision.datasets
 import torchvision.transforms as transforms
 from torch.autograd import Variable
+from torch import linalg as LA
 import wandb
 import models
 import act_funcs
@@ -60,6 +61,7 @@ def main():
 	parser.add_argument('--no_wandb', dest='use_wandb', action='store_false', help='Do not use wandb')
 	parser.add_argument('--model_details', action='store_true', help='Whether to show model details')
 	parser.add_argument('--ortho', type=str, default='SRIP', help='Select which orthogonality do you want to perform')
+	parser.add_argument('--ortho_decay', type=float, default=1e-2, help = 'ortho weight decay')
 	args = parser.parse_args()
 
 	if args.dataset_path is None:
@@ -119,11 +121,92 @@ def main():
 
 	print()
 
-# Perform Orthogonality Regularization
-def l2_reg_ortho(C, mdl):
+"""Function used for Orthogonal Regularization"""
+def l2_reg_ortho(C, model):
+    #using similar approach as srip as getting this error w/o it - RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!
+    if C.ortho == 'SO':
+        l2_reg = None
+        for W in model.parameters():
+            if W.ndimension() < 2:
+                continue
+            else:
+                cols = W[0].numel()
+                rows = W.shape[0]
+                w1 = W.view(-1, cols)
+                wt = torch.transpose(w1, 0, 1)
+                m = torch.matmul(wt, w1)
+                ident = Variable(torch.eye(cols, cols))
+                ident = ident.cuda()
+                w_tmp = m - ident
+                if not l2_reg:
+                    l2_reg = LA.norm(w_tmp).clone().detach() ** 2
+                else:
+                    l2_reg += LA.norm(w_tmp).clone().detach() ** 2
+    if C.ortho == 'SSO': #selective soft orthogonality
+        l2_reg = None
+        for W in model.parameters():
+            if W.ndimension() < 2:
+                continue
+            else:
+                cols = W[0].numel()
+                rows = W.shape[0]
+                w1 = W.view(-1, cols)
+                wt = torch.transpose(w1, 0, 1)
+                if rows > cols:
+                    m = torch.matmul(wt, w1)
+                    ident = Variable(torch.eye(cols, cols))
+                if cols > rows:
+                    m = torch.matmul(w1, wt)
+                    ident = Variable(torch.eye(rows, rows))
+                ident = ident.cuda()
+                w_tmp = m - ident
+                if not l2_reg:
+                    l2_reg = LA.norm(w_tmp).clone().detach() ** 2
+                else:
+                    l2_reg += LA.norm(w_tmp).clone().detach() ** 2
+    if C.ortho == 'DSO':
+        l2_reg = None
+        for W in model.parameters():
+            if W.ndimension() < 2:
+                continue
+            else:
+                cols = W[0].numel()
+                rows = W.shape[0]
+                w1 = W.view(-1, cols)
+                wt = torch.transpose(w1, 0, 1)
+                wtw = torch.matmul(wt, w1)
+                ident1 = Variable(torch.eye(cols, cols))
+                ident1 = ident1.cuda()
+                wwt = torch.matmul(w1, wt)
+                ident2 = Variable(torch.eye(rows, rows))
+                ident2 = ident2.cuda()
+                w_tmp1 = wtw - ident1
+                w_tmp2 = wwt - ident2
+                if not l2_reg:
+                    l2_reg = LA.norm(w_tmp1).clone().detach() ** 2 + LA.norm(w_tmp2).clone().detach() ** 2
+                else:
+                    l2_reg += LA.norm(w_tmp1).clone().detach() ** 2 + LA.norm(w_tmp2).clone().detach() ** 2
+    if C.ortho == 'MC':
+        l2_reg = None
+        for W in model.parameters():
+            if W.ndimension() < 2:
+                continue
+            else:
+                cols = W[0].numel()
+                rows = W.shape[0]
+                w1 = W.view(-1, cols)
+                wt = torch.transpose(w1, 0, 1)
+                m = torch.matmul(wt, w1)
+                ident = Variable(torch.eye(cols, cols))
+                ident = ident.cuda()
+                w_tmp = m - ident
+                if not l2_reg:
+                    l2_reg = LA.norm(w_tmp, float('inf')).clone().detach()
+                else:
+                    l2_reg += LA.norm(w_tmp, float('inf')).clone().detach()
     if C.ortho == 'SRIP':
         l2_reg = None
-        for W in mdl.parameters():
+        for W in model.parameters():
                 if W.ndimension() < 2:
                         continue
                 else:
@@ -144,15 +227,15 @@ def l2_reg_ortho(C, mdl):
                         b_k = b_k.cuda()
 
                         v1 = torch.matmul(w_tmp, b_k)
-                        norm1 = torch.norm(v1,2)
+                        norm1 = LA.norm(v1,2)
                         v2 = torch.div(v1,norm1)
                         v3 = torch.matmul(w_tmp,v2)
 
                         if l2_reg is None:
-                                l2_reg = (torch.norm(v3,2))**2
+                                l2_reg = (LA.norm(v3,2).clone().detach())**2
                         else:
-                                l2_reg = l2_reg + (torch.norm(v3,2))**2
-        return l2_reg
+                                l2_reg += (LA.norm(v3,2).clone().detach())**2
+    return l2_reg
 
 
 # Load the dataset
@@ -539,6 +622,8 @@ def train_model(C, train_loader, valid_loader, model, output_layer, criterion, o
 		num_train_accum_full = num_batch_accum * ((num_train_batches - 1) // num_batch_accum)
 		num_train_accum_samples_last = len(train_loader.dataset) - num_train_accum_full * train_loader.batch_size
 		train_loss = 0
+		ortho_loss = 0
+		ortho_loss_decay = 0
 		train_topk = [0] * 5
 		init_detail_stamp = last_detail_stamp = timeit.default_timer()
 
@@ -552,11 +637,13 @@ def train_model(C, train_loader, valid_loader, model, output_layer, criterion, o
 			with torch.autocast(device_type=device.type, enabled=amp_enabled):
 				output = model(data)
 				oloss =  l2_reg_ortho(C, model)
-				o_d = 0
-				if epoch>120: o_d=0.0
-				elif epoch > 70: o_d = 1e-6 * o_d
-				elif epoch > 50: o_d = 1e-4 * o_d
-				elif epoch > 20: o_d = 1e-3 * o_d
+				o_d = C.ortho_decay
+				if epoch > 45: o_d = 1e-6 * o_d
+				elif epoch > 30: o_d = 1e-4 * o_d
+				elif epoch > 15: o_d = 1e-3 * o_d
+				log['ortho_decay']=o_d
+				ortho_loss_i = oloss
+				ortho_loss_decay_i = o_d * oloss
 				mean_batch_loss = criterion(output if output_layer is None else output_layer(output), target) + o_d * oloss
 				mean_accum_batch_loss = mean_batch_loss / num_batch_accum if batch_num <= num_train_accum_full else mean_batch_loss * (num_in_batch / num_train_accum_samples_last)
 			scaler.scale(mean_accum_batch_loss).backward()
@@ -576,6 +663,8 @@ def train_model(C, train_loader, valid_loader, model, output_layer, criterion, o
 			for k in range(5):
 				train_topk[k] += batch_topk_sum[k]
 			train_loss += mean_batch_loss.item() * num_in_batch
+			ortho_loss += ortho_loss_i * num_in_batch
+			ortho_loss_decay += ortho_loss_decay_i * num_in_batch
 
 			detail_stamp = timeit.default_timer()
 			if detail_stamp - last_detail_stamp >= 2.0:
@@ -589,6 +678,7 @@ def train_model(C, train_loader, valid_loader, model, output_layer, criterion, o
 			train_topk[k] /= num_train_samples
 
 		log.update(train_loss=train_loss, min_train_loss=min_train_loss)
+		log.update(ortho_loss=ortho_loss, ortho_loss_decay=ortho_loss_decay)
 		for k in range(5):
 			log[f'train_top{k + 1}'] = train_topk[k]
 
