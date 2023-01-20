@@ -644,8 +644,6 @@ def train_model(C, train_loader, valid_loader, model, output_layer, criterion, o
 				oloss =  l2_reg_ortho(C, model)
 				
 				log['ortho_decay']=o_d
-				ortho_loss_i = oloss.item()
-				ortho_loss_decay_i = o_d * oloss.item()
 				mean_batch_loss = criterion(output if output_layer is None else output_layer(output), target) + o_d * oloss
 				mean_accum_batch_loss = mean_batch_loss / num_batch_accum if batch_num <= num_train_accum_full else mean_batch_loss * (num_in_batch / num_train_accum_samples_last)
 			scaler.scale(mean_accum_batch_loss).backward()
@@ -665,8 +663,8 @@ def train_model(C, train_loader, valid_loader, model, output_layer, criterion, o
 			for k in range(5):
 				train_topk[k] += batch_topk_sum[k]
 			train_loss += mean_batch_loss.item() * num_in_batch
-			ortho_loss += ortho_loss_i.item() * num_in_batch
-			ortho_loss_decay += ortho_loss_decay_i.item() * num_in_batch
+			ortho_loss += oloss.item() * num_in_batch
+			ortho_loss_decay += oloss.item() * num_in_batch * o_d
 
 			detail_stamp = timeit.default_timer()
 			if detail_stamp - last_detail_stamp >= 2.0:
