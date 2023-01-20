@@ -61,7 +61,7 @@ def main():
 	parser.add_argument('--no_wandb', dest='use_wandb', action='store_false', help='Do not use wandb')
 	parser.add_argument('--model_details', action='store_true', help='Whether to show model details')
 	parser.add_argument('--ortho', type=str, default='SRIP', help='Select which orthogonality do you want to perform')
-	parser.add_argument('--ortho_decay', type=float, default=1e-2, help = 'ortho weight decay')
+	parser.add_argument('--ortho_decay', type=float, default=1e-1, help = 'ortho weight decay')
 	args = parser.parse_args()
 
 	if args.dataset_path is None:
@@ -139,9 +139,9 @@ def l2_reg_ortho(C, model):
                 ident = ident.cuda()
                 w_tmp = m - ident
                 if not l2_reg:
-                    l2_reg = LA.norm(w_tmp).clone().detach() ** 2
+                    l2_reg = LA.norm(w_tmp).clone() ** 2
                 else:
-                    l2_reg += LA.norm(w_tmp).clone().detach() ** 2
+                    l2_reg += LA.norm(w_tmp) ** 2
     if C.ortho == 'SSO': #selective soft orthogonality
         l2_reg = None
         for W in model.parameters():
@@ -161,9 +161,9 @@ def l2_reg_ortho(C, model):
                 ident = ident.cuda()
                 w_tmp = m - ident
                 if not l2_reg:
-                    l2_reg = LA.norm(w_tmp).clone().detach() ** 2
+                    l2_reg = LA.norm(w_tmp).clone() ** 2
                 else:
-                    l2_reg += LA.norm(w_tmp).clone().detach() ** 2
+                    l2_reg += LA.norm(w_tmp) ** 2
     if C.ortho == 'DSO':
         l2_reg = None
         for W in model.parameters():
@@ -183,9 +183,9 @@ def l2_reg_ortho(C, model):
                 w_tmp1 = wtw - ident1
                 w_tmp2 = wwt - ident2
                 if not l2_reg:
-                    l2_reg = LA.norm(w_tmp1).clone().detach() ** 2 + LA.norm(w_tmp2).clone().detach() ** 2
+                    l2_reg = LA.norm(w_tmp1).clone() ** 2 + LA.norm(w_tmp2).clone() ** 2
                 else:
-                    l2_reg += LA.norm(w_tmp1).clone().detach() ** 2 + LA.norm(w_tmp2).clone().detach() ** 2
+                    l2_reg += LA.norm(w_tmp1) ** 2 + LA.norm(w_tmp2) ** 2
     if C.ortho == 'MC':
         l2_reg = None
         for W in model.parameters():
@@ -201,9 +201,9 @@ def l2_reg_ortho(C, model):
                 ident = ident.cuda()
                 w_tmp = m - ident
                 if not l2_reg:
-                    l2_reg = LA.norm(w_tmp, float('inf')).clone().detach()
+                    l2_reg = LA.norm(w_tmp, float('inf')).clone()
                 else:
-                    l2_reg += LA.norm(w_tmp, float('inf')).clone().detach()
+                    l2_reg += LA.norm(w_tmp, float('inf'))
     if C.ortho == 'SRIP':
         l2_reg = None
         for W in model.parameters():
@@ -232,9 +232,9 @@ def l2_reg_ortho(C, model):
                         v3 = torch.matmul(w_tmp,v2)
 
                         if l2_reg is None:
-                                l2_reg = (LA.norm(v3,2).clone().detach())**2
+                                l2_reg = (LA.norm(v3,2)).clone() **2
                         else:
-                                l2_reg += (LA.norm(v3,2).clone().detach())**2
+                                l2_reg += (LA.norm(v3,2))**2
     return l2_reg
 
 
@@ -626,7 +626,12 @@ def train_model(C, train_loader, valid_loader, model, output_layer, criterion, o
 		ortho_loss_decay = 0
 		train_topk = [0] * 5
 		init_detail_stamp = last_detail_stamp = timeit.default_timer()
-
+		
+		o_d = C.ortho_decay
+		if epoch > 45: o_d = 1e-6 * o_d
+		elif epoch > 30: o_d = 1e-4 * o_d
+		elif epoch > 15: o_d = 1e-3 * o_d
+		
 		optimizer.zero_grad(set_to_none=True)
 		for batch_num, (data, target_cpu) in enumerate(train_loader, 1):
 
@@ -637,10 +642,7 @@ def train_model(C, train_loader, valid_loader, model, output_layer, criterion, o
 			with torch.autocast(device_type=device.type, enabled=amp_enabled):
 				output = model(data)
 				oloss =  l2_reg_ortho(C, model)
-				o_d = C.ortho_decay
-				if epoch > 45: o_d = 1e-6 * o_d
-				elif epoch > 30: o_d = 1e-4 * o_d
-				elif epoch > 15: o_d = 1e-3 * o_d
+				
 				log['ortho_decay']=o_d
 				ortho_loss_i = oloss
 				ortho_loss_decay_i = o_d * oloss
